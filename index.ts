@@ -59,7 +59,9 @@ export class CmailClient {
     )
     this.apiKey = options.apiKey
     this.timeoutMs = timeoutMs
-    this.fetch = options.fetch ?? globalThis.fetch
+    // Calls the global fetch unbound: Cloudflare Workers throw "Illegal invocation" if its `this` is the client.
+    this.fetch =
+      options.fetch ?? (async (url, init) => await globalThis.fetch(url, init))
   }
 
   /** Sends once, without retries: retrying a timed-out send may duplicate email. */

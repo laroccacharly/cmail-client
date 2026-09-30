@@ -18,6 +18,14 @@ const clientWith = (transport: (url: URL, init: RequestInit) => Response) =>
     fetch: async (url, init) => await Promise.resolve(transport(url, init)),
   })
 
+// Like fetch on Cloudflare Workers, which throws unless called unbound or on globalThis.
+const workersFetch = async function workersFetch(this: unknown) {
+  if (this !== undefined && this !== globalThis) {
+    throw new TypeError("Illegal invocation")
+  }
+  return await Promise.resolve(Response.json(result))
+}
+
 const failure = async (promise: Promise<unknown>): Promise<Error> => {
   try {
     await promise
@@ -95,6 +103,19 @@ describe("standalone cmail client", () => {
       client.sendEmail(input, { signal: controller.signal })
     )
     expect(error.name).toBe("AbortError")
+  })
+
+  test("calls the global fetch with its own this, as Workers require", async () => {
+    const globalFetch = globalThis.fetch
+    globalThis.fetch = Object.assign(workersFetch, {
+      preconnect: globalFetch.preconnect,
+    })
+    try {
+      const client = new CmailClient({ apiKey: "test-key" })
+      expect(await client.sendEmail(input)).toEqual(result)
+    } finally {
+      globalThis.fetch = globalFetch
+    }
   })
 
   test("rejects invalid configuration", () => {
