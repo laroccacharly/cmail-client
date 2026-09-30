@@ -86,7 +86,9 @@ export class CmailClient {
         body: input.body,
       }),
       signal,
-      redirect: "error",
+      // Hands a redirect back as a failed response rather than following it with the API key. Workers reject
+      // redirect: "error".
+      redirect: "manual",
     })
     if (!response.ok) {
       throw new CmailApiError(response.status, await response.text())

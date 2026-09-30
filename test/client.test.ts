@@ -18,10 +18,24 @@ const clientWith = (transport: (url: URL, init: RequestInit) => Response) =>
     fetch: async (url, init) => await Promise.resolve(transport(url, init)),
   })
 
-// Like fetch on Cloudflare Workers, which throws unless called unbound or on globalThis.
-const workersFetch = async function workersFetch(this: unknown) {
+// Like fetch on Cloudflare Workers, which throws unless called unbound or on globalThis, and rejects
+// redirect: "error".
+const workersFetch = async function workersFetch(
+  this: unknown,
+  _url: URL | RequestInfo,
+  init?: RequestInit
+) {
   if (this !== undefined && this !== globalThis) {
     throw new TypeError("Illegal invocation")
+  }
+  if (
+    init?.redirect !== undefined &&
+    init.redirect !== "follow" &&
+    init.redirect !== "manual"
+  ) {
+    throw new TypeError(
+      'Invalid redirect value, must be one of "follow" or "manual"'
+    )
   }
   return await Promise.resolve(Response.json(result))
 }
@@ -42,7 +56,7 @@ describe("standalone cmail client", () => {
   test("sends an authenticated JSON request and returns the result", async () => {
     const requests: Request[] = []
     const client = clientWith((url, init) => {
-      expect(init.redirect).toBe("error")
+      expect(init.redirect).toBe("manual")
       requests.push(new Request(url, init))
       return Response.json(result, { status: 201 })
     })
@@ -77,6 +91,20 @@ describe("standalone cmail client", () => {
     expect(calls).toBe(1)
   })
 
+  test("fails on a redirect instead of following it with the API key", async () => {
+    let calls = 0
+    const client = clientWith(() => {
+      calls += 1
+      return new Response(null, {
+        status: 302,
+        headers: { Location: "https://elsewhere.example.com/" },
+      })
+    })
+    const error = await failure(client.sendEmail(input))
+    expect(error).toBeInstanceOf(CmailApiError)
+    expect(calls).toBe(1)
+  })
+
   test("rejects malformed success responses", async () => {
     const client = clientWith(() => Response.json({ ok: true }))
     const error = await failure(client.sendEmail(input))
@@ -105,7 +133,7 @@ describe("standalone cmail client", () => {
     expect(error.name).toBe("AbortError")
   })
 
-  test("calls the global fetch with its own this, as Workers require", async () => {
+  test("calls the global fetch as Workers require", async () => {
     const globalFetch = globalThis.fetch
     globalThis.fetch = Object.assign(workersFetch, {
       preconnect: globalFetch.preconnect,
