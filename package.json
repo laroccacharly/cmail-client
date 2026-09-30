@@ -1,0 +1,27 @@
+{
+  "name": "cmail-client",
+  "version": "0.1.0",
+  "description": "TypeScript client for sending email through cmail",
+  "license": "MIT",
+  "bin": {
+    "cmail-send": "./send.ts"
+  },
+  "type": "module",
+  "exports": "./index.ts",
+  "scripts": {
+    "send": "bun ./send.ts",
+    "test": "bun test",
+    "lint": "oxlint .",
+    "format": "oxfmt ."
+  },
+  "dependencies": {
+    "zod": "^4"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.2",
+    "oxfmt": "^0.65.0",
+    "oxlint": "^1.80.0",
+    "oxlint-tsgolint": "7",
+    "ultracite": "^7.11.1"
+  }
+}
