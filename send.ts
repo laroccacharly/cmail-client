@@ -1,36 +1,35 @@
 #!/usr/bin/env bun
-import { z } from "zod"
+import { Effect, Exit, Option, Schema } from "effect"
+import { FetchHttpClient } from "effect/http"
 
-import { CmailClient } from "./index.ts"
+import { Cmail, CmailError } from "./index.ts"
 
-const [to, title, body] = Bun.argv.slice(2)
-const nonEmpty = z.string().min(1)
-const input = z
-  .object({
-    CMAIL_ORIGIN: nonEmpty.optional(),
-    CMAIL_API_KEY: nonEmpty,
-    to: nonEmpty,
-    title: nonEmpty,
-    body: nonEmpty,
-  })
-  .safeParse({ ...Bun.env, to, title, body })
+const Args = Schema.Tuple([
+  Schema.NonEmptyString,
+  Schema.NonEmptyString,
+  Schema.NonEmptyString,
+])
 
-if (!input.success) {
-  console.error(
-    'Usage: CMAIL_API_KEY=... [CMAIL_ORIGIN=https://cmail.laroccadev.com] cmail-send recipient@gmail.com "Subject" "Message"'
+const send = Effect.gen(function* send() {
+  const [to, title, body] = yield* Schema.decodeUnknownEffect(Args)(
+    Bun.argv.slice(2)
   )
-  process.exit(1)
-}
+  const cmail = yield* Cmail
+  return yield* cmail.sendEmail({ to, title, body })
+}).pipe(
+  Effect.provide(Cmail.layerConfig),
+  Effect.provide(FetchHttpClient.layer)
+)
 
-const { CMAIL_ORIGIN, CMAIL_API_KEY, ...email } = input.data
-
-try {
-  const client = new CmailClient({
-    origin: CMAIL_ORIGIN,
-    apiKey: CMAIL_API_KEY,
-  })
-  console.log(JSON.stringify(await client.sendEmail(email), null, 2))
-} catch (error) {
-  console.error(error instanceof Error ? error.message : "Email send failed")
+const exit = await Effect.runPromiseExit(send)
+if (Exit.isSuccess(exit)) {
+  console.log(JSON.stringify(exit.value, null, 2))
+} else {
+  const error = Exit.findErrorOption(exit)
+  console.error(
+    Option.isSome(error) && error.value instanceof CmailError
+      ? error.value.message
+      : 'Usage: CMAIL_API_KEY=... [CMAIL_ORIGIN=https://cmail.laroccadev.com] cmail-send recipient@gmail.com "Subject" "Message"'
+  )
   process.exitCode = 1
 }

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import { once } from "node:events"
 
 import { CmailApiError, CmailClient } from "../index.ts"
 
@@ -121,16 +122,26 @@ describe("standalone cmail client", () => {
 
   test("passes cancellation to the transport", async () => {
     const controller = new AbortController()
-    controller.abort()
-    const client = clientWith((_url, init) => {
-      expect(init.signal?.aborted).toBe(true)
-      init.signal?.throwIfAborted()
-      return Response.json(result)
+    let transportAborted = false
+    const client = new CmailClient({
+      apiKey: "test-key",
+      fetch: async (_url, init) => {
+        const { signal } = init
+        if (!signal) {
+          throw new Error("Expected a signal")
+        }
+        const aborted = once(signal, "abort")
+        controller.abort()
+        await aborted
+        transportAborted = true
+        throw new Error("aborted")
+      },
     })
     const error = await failure(
       client.sendEmail(input, { signal: controller.signal })
     )
     expect(error.name).toBe("AbortError")
+    expect(transportAborted).toBe(true)
   })
 
   test("calls the global fetch as Workers require", async () => {

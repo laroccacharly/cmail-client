@@ -1,20 +1,21 @@
-import { z } from "zod"
+import { Effect, Exit, Option, Redacted } from "effect"
+import { FetchHttpClient } from "effect/http"
 
-export interface SendEmailRequest {
-  to: string
-  title: string
-  body: string
-}
+import { Cmail, CmailError, DEFAULT_ORIGIN } from "./cmail.ts"
+import type { SendEmailRequest, SendEmailResult } from "./cmail.ts"
 
-const sendEmailResultSchema = z.object({
-  id: z.int(),
-  messageId: z.string(),
-  to: z.string(),
-  from: z.string(),
-  title: z.string(),
-})
-
-export type SendEmailResult = z.infer<typeof sendEmailResultSchema>
+export {
+  Cmail,
+  CmailError,
+  DEFAULT_ORIGIN,
+  SendEmailRequestSchema,
+  SendEmailResultSchema,
+} from "./cmail.ts"
+export type {
+  CmailOptions,
+  SendEmailRequest,
+  SendEmailResult,
+} from "./cmail.ts"
 
 export type CmailFetch = (url: URL, init: RequestInit) => Promise<Response>
 
@@ -38,12 +39,24 @@ export class CmailApiError extends Error {
   }
 }
 
-/** A standalone client for cmail's authenticated outbound email API. */
+// Rejects as the client did before it was built on the Cmail service.
+const toPromiseError = (error: CmailError): unknown => {
+  if (error.reason === "Status") {
+    return new CmailApiError(error.status ?? 0, error.detail)
+  }
+  if (error.reason === "Transport") {
+    return error.cause
+  }
+  if (error.reason === "Timeout") {
+    return new DOMException(error.detail, "TimeoutError")
+  }
+  return new Error(error.detail, { cause: error.cause })
+}
+
+/** A Promise client for cmail's authenticated outbound email API. Effect code should use the Cmail service. */
 export class CmailClient {
-  private readonly endpoint: URL
-  private readonly apiKey: string
-  private readonly timeoutMs: number
-  private readonly fetch: CmailFetch
+  private readonly layer: ReturnType<typeof Cmail.layer>
+  private readonly fetch: CmailFetch | undefined
 
   constructor(options: CmailClientOptions) {
     if (!options.apiKey.trim()) {
@@ -53,15 +66,12 @@ export class CmailClient {
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
       throw new Error("timeoutMs must be a positive integer")
     }
-    this.endpoint = new URL(
-      "/api/email/send",
-      options.origin ?? "https://cmail.laroccadev.com"
-    )
-    this.apiKey = options.apiKey
-    this.timeoutMs = timeoutMs
-    // Calls the global fetch unbound: Cloudflare Workers throw "Illegal invocation" if its `this` is the client.
-    this.fetch =
-      options.fetch ?? (async (url, init) => await globalThis.fetch(url, init))
+    this.layer = Cmail.layer({
+      apiKey: Redacted.make(options.apiKey),
+      origin: options.origin ?? DEFAULT_ORIGIN,
+      timeout: timeoutMs,
+    })
+    this.fetch = options.fetch
   }
 
   /** Sends once, without retries: retrying a timed-out send may duplicate email. */
@@ -69,36 +79,33 @@ export class CmailClient {
     input: SendEmailRequest,
     options: { signal?: AbortSignal } = {}
   ): Promise<SendEmailResult> {
-    const timeout = AbortSignal.timeout(this.timeoutMs)
-    const signal = options.signal
-      ? AbortSignal.any([options.signal, timeout])
-      : timeout
-    const response = await this.fetch(this.endpoint, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${this.apiKey}`,
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body: JSON.stringify({
-        to: input.to,
-        title: input.title,
-        body: input.body,
-      }),
-      signal,
-      // Hands a redirect back as a failed response rather than following it with the API key. Workers reject
-      // redirect: "error".
-      redirect: "manual",
-    })
-    if (!response.ok) {
-      throw new CmailApiError(response.status, await response.text())
+    const custom = this.fetch
+    const send = Cmail.use((cmail) => cmail.sendEmail(input)).pipe(
+      Effect.provide(this.layer),
+      Effect.provide(FetchHttpClient.layer),
+      custom === undefined
+        ? (effect) => effect
+        : Effect.provideService(
+            FetchHttpClient.Fetch,
+            Object.assign(
+              async (url: RequestInfo | URL, init?: RequestInit) =>
+                await custom(
+                  new URL(url instanceof Request ? url.url : url),
+                  init ?? {}
+                ),
+              { preconnect: globalThis.fetch.preconnect }
+            )
+          )
+    )
+    const exit = await Effect.runPromiseExit(send, { signal: options.signal })
+    if (Exit.isSuccess(exit)) {
+      return exit.value
     }
-    const result = sendEmailResultSchema.safeParse(await response.json())
-    if (!result.success) {
-      throw new Error("Cmail API returned an invalid send response", {
-        cause: result.error,
-      })
+    options.signal?.throwIfAborted()
+    const error = Exit.findErrorOption(exit)
+    if (Option.isSome(error) && error.value instanceof CmailError) {
+      throw toPromiseError(error.value)
     }
-    return result.data
+    throw new Error("Email send failed", { cause: exit.cause })
   }
 }
